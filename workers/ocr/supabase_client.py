@@ -24,12 +24,26 @@ class SupabaseDB:
         
         self.client: Client = create_client(url, key)
     
-    def poll_ocr_job(self) -> Optional[Dict[str, Any]]:
+    def claim_ocr_job(self) -> Optional[Dict[str, Any]]:
         """
-        Poll for one queued OCR job.
-        Returns the job dict or None if no jobs available.
+        Atomically claim one queued OCR job using UPDATE ... RETURNING.
+        Uses RPC to avoid race conditions between multiple workers.
+        Returns the claimed job dict or None if no jobs available.
         """
-        response = self.client.table("pipeline_jobs").select("*").eq(
+        try:
+            response = self.client.rpc("claim_ocr_job", {}).execute()
+            if response.data and len(response.data) > 0:
+                return response.data[0]
+        except Exception:
+            pass
+        return self._poll_and_claim_ocr_job()
+    
+    def _poll_and_claim_ocr_job(self) -> Optional[Dict[str, Any]]:
+        """
+        Fallback: Poll for one queued OCR job and atomically claim it.
+        Uses optimistic locking pattern - update only if still queued.
+        """
+        poll_response = self.client.table("pipeline_jobs").select("id, attempt").eq(
             "status", "queued"
         ).eq(
             "job_type", "clean"
@@ -39,18 +53,39 @@ class SupabaseDB:
             "created_at", desc=False
         ).limit(1).execute()
         
-        if response.data and len(response.data) > 0:
-            return response.data[0]
-        return None
-    
-    def set_job_running(self, job_id: str, current_attempt: Optional[int]) -> None:
-        """Mark job as running and increment attempt counter."""
-        attempt = (current_attempt or 0) + 1
-        self.client.table("pipeline_jobs").update({
+        if not poll_response.data or len(poll_response.data) == 0:
+            return None
+        
+        job_id = poll_response.data[0]["id"]
+        current_attempt = poll_response.data[0].get("attempt") or 0
+        
+        claim_response = self.client.table("pipeline_jobs").update({
             "status": "running",
             "started_at": utc_now(),
-            "attempt": attempt
-        }).eq("id", job_id).execute()
+            "attempt": current_attempt + 1
+        }).eq(
+            "id", job_id
+        ).eq(
+            "status", "queued"
+        ).execute()
+        
+        if not claim_response.data or len(claim_response.data) == 0:
+            return None
+        
+        job_response = self.client.table("pipeline_jobs").select("*").eq(
+            "id", job_id
+        ).execute()
+        
+        if job_response.data and len(job_response.data) > 0:
+            return job_response.data[0]
+        return None
+    
+    def poll_ocr_job(self) -> Optional[Dict[str, Any]]:
+        """
+        Poll for and atomically claim one queued OCR job.
+        Returns the claimed job dict or None if no jobs available.
+        """
+        return self.claim_ocr_job()
     
     def set_job_success(self, job_id: str, output: Dict[str, Any]) -> None:
         """Mark job as success with output data."""
@@ -95,20 +130,29 @@ class SupabaseDB:
     def get_segment_edition_work(self, segment_id: str) -> Optional[Dict[str, str]]:
         """
         Get edition_id and work_id for a segment.
+        Uses two queries to avoid nested join complexities.
         Returns dict with 'edition_id' and 'work_id' keys, or None.
         """
-        response = self.client.table("segments").select(
-            "edition_id, editions(work_id)"
-        ).eq("id", segment_id).execute()
+        seg_response = self.client.table("segments").select(
+            "edition_id"
+        ).eq("id", segment_id).limit(1).execute()
         
-        if response.data and len(response.data) > 0:
-            row = response.data[0]
-            edition_id = row.get("edition_id")
-            work_id = None
-            if row.get("editions"):
-                work_id = row["editions"].get("work_id")
-            return {"edition_id": edition_id, "work_id": work_id}
-        return None
+        if not seg_response.data or len(seg_response.data) == 0:
+            return None
+        
+        edition_id = seg_response.data[0].get("edition_id")
+        if not edition_id:
+            return None
+        
+        ed_response = self.client.table("editions").select(
+            "work_id"
+        ).eq("id", edition_id).limit(1).execute()
+        
+        work_id = None
+        if ed_response.data and len(ed_response.data) > 0:
+            work_id = ed_response.data[0].get("work_id")
+        
+        return {"edition_id": edition_id, "work_id": work_id}
     
     def insert_asset(
         self,

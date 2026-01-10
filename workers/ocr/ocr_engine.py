@@ -23,8 +23,8 @@ def get_ocr_instance():
         use_angle_cls = os.environ.get("OCR_USE_ANGLE_CLS", "true").lower() == "true"
         
         _ocr_instance = PaddleOCR(
-            lang=lang,
-            use_textline_orientation=use_angle_cls
+            use_angle_cls=use_angle_cls,
+            lang=lang
         )
     
     return _ocr_instance
@@ -85,12 +85,19 @@ def build_ocr_output(
     segment_id: Optional[str],
     chapter: Optional[int],
     page: Optional[int],
-    raw_r2_key: str
+    raw_r2_key: str,
+    raw_asset_id: Optional[str] = None
 ) -> Dict[str, Any]:
     """
     Build the full OCR JSON output with metadata.
     """
     return {
+        "version": "ocr_v1",
+        "engine": "paddleocr",
+        "source": {
+            "raw_asset_id": raw_asset_id,
+            "raw_r2_key": raw_r2_key
+        },
         "metadata": {
             "work_id": work_id,
             "edition_id": edition_id,

@@ -13,6 +13,7 @@ import sys
 import time
 import argparse
 import traceback
+from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
@@ -32,29 +33,34 @@ from workers.ocr.key_parser import (
 
 logger = setup_logging("ocr_worker")
 
+
+def elapsed_ms(start_time: datetime) -> float:
+    """Calculate elapsed milliseconds since start_time."""
+    return (datetime.now(timezone.utc) - start_time).total_seconds() * 1000
+
 def process_job(db: SupabaseDB, r2: R2Client, job: dict) -> None:
     """
     Process a single OCR job.
     
     Steps:
-    1. Mark job running
-    2. Load and validate raw asset
-    3. Resolve segment_id, work_id, edition_id
-    4. Check idempotency (skip if output exists)
-    5. Download image from R2
-    6. Run OCR
-    7. Upload result to R2
-    8. Insert asset record and link to segment
-    9. Mark job success
+    1. Load and validate raw asset
+    2. Resolve segment_id, work_id, edition_id
+    3. Check idempotency (skip if output exists)
+    4. Download image from R2
+    5. Run OCR
+    6. Upload result to R2
+    7. Insert asset record and link to segment
+    8. Mark job success
+    
+    Note: Job is already claimed as 'running' by poll_ocr_job.
     """
+    job_start = datetime.now(timezone.utc)
     job_id = job["id"]
     job_input = job.get("input", {})
     raw_asset_id = job_input.get("raw_asset_id")
     force = job_input.get("force", False)
     
-    logger.info(f"Processing job {job_id} | raw_asset_id={raw_asset_id}")
-    
-    db.set_job_running(job_id, job.get("attempt", 0))
+    logger.info(f"[job={job_id}] Starting OCR job | raw_asset_id={raw_asset_id}")
     
     raw_asset = db.get_asset(raw_asset_id)
     if not raw_asset:
@@ -67,6 +73,8 @@ def process_job(db: SupabaseDB, r2: R2Client, job: dict) -> None:
     if not raw_r2_key:
         raise ValueError(f"Asset has no r2_key: {raw_asset_id}")
     
+    logger.info(f"[job={job_id}] raw_r2_key={raw_r2_key}")
+    
     segment_id = job.get("segment_id")
     if not segment_id:
         segment_id = db.get_segment_id_for_asset(raw_asset_id)
@@ -74,7 +82,7 @@ def process_job(db: SupabaseDB, r2: R2Client, job: dict) -> None:
     if not segment_id:
         raise ValueError(f"Cannot resolve segment_id for asset {raw_asset_id}")
     
-    logger.info(f"  segment_id={segment_id}")
+    logger.info(f"[job={job_id}] segment_id={segment_id}")
     
     work_id = job.get("work_id")
     edition_id = job.get("edition_id")
@@ -91,10 +99,10 @@ def process_job(db: SupabaseDB, r2: R2Client, job: dict) -> None:
                 work_id = work_id or seg_info.get("work_id")
                 edition_id = edition_id or seg_info.get("edition_id")
     
-    logger.info(f"  work_id={work_id}, edition_id={edition_id}")
+    logger.info(f"[job={job_id}] work_id={work_id}, edition_id={edition_id}")
     
     output_r2_key = build_output_key(raw_r2_key, raw_asset_id)
-    logger.info(f"  output_r2_key={output_r2_key}")
+    logger.info(f"[job={job_id}] output_r2_key={output_r2_key}")
     
     if not force:
         existing_ocr_id = db.ocr_asset_exists(output_r2_key)
@@ -108,16 +116,18 @@ def process_job(db: SupabaseDB, r2: R2Client, job: dict) -> None:
                 "ocr_asset_id": existing_ocr_id,
                 "ocr_r2_key": output_r2_key
             })
-            logger.info(f"  Skipped - OCR already exists: {existing_ocr_id}")
+            logger.info(f"[job={job_id}] Skipped (already exists) | ocr_asset_id={existing_ocr_id} | elapsed={elapsed_ms(job_start):.0f}ms")
             return
     
-    logger.info(f"  Downloading image from R2: {raw_r2_key}")
+    download_start = datetime.now(timezone.utc)
     image_bytes = r2.get_object(raw_r2_key)
-    logger.info(f"  Downloaded {len(image_bytes)} bytes")
+    download_ms = elapsed_ms(download_start)
+    logger.info(f"[job={job_id}] Downloaded {len(image_bytes)} bytes in {download_ms:.0f}ms")
     
-    logger.info("  Running OCR...")
+    ocr_start = datetime.now(timezone.utc)
     lines = run_ocr(image_bytes)
-    logger.info(f"  OCR complete: {len(lines)} lines detected")
+    ocr_ms = elapsed_ms(ocr_start)
+    logger.info(f"[job={job_id}] OCR complete: {len(lines)} lines in {ocr_ms:.0f}ms")
     
     chapter_num = extract_chapter_number(parsed.chapter) if parsed.chapter else None
     page_num = extract_page_number(parsed.page) if parsed.page else None
@@ -129,16 +139,18 @@ def process_job(db: SupabaseDB, r2: R2Client, job: dict) -> None:
         segment_id=segment_id,
         chapter=chapter_num,
         page=page_num,
-        raw_r2_key=raw_r2_key
+        raw_r2_key=raw_r2_key,
+        raw_asset_id=raw_asset_id
     )
     
     json_bytes = json_dumps(ocr_output)
     sha256_hash = compute_sha256(json_bytes)
     
-    logger.info(f"  Uploading OCR JSON to R2: {output_r2_key}")
+    upload_start = datetime.now(timezone.utc)
     r2.put_object(output_r2_key, json_bytes, "application/json")
+    upload_ms = elapsed_ms(upload_start)
+    logger.info(f"[job={job_id}] Uploaded {len(json_bytes)} bytes in {upload_ms:.0f}ms")
     
-    logger.info("  Inserting asset record...")
     ocr_asset_id = db.insert_asset(
         r2_key=output_r2_key,
         bucket=r2.bucket,
@@ -147,21 +159,21 @@ def process_job(db: SupabaseDB, r2: R2Client, job: dict) -> None:
         byte_size=len(json_bytes),
         sha256=sha256_hash
     )
-    logger.info(f"  Created asset: {ocr_asset_id}")
     
     db.link_segment_asset(segment_id, ocr_asset_id, "ocr_json")
-    logger.info("  Linked asset to segment")
     
+    total_ms = elapsed_ms(job_start)
     db.set_job_success(job_id, {
         "task": "ocr_page",
         "raw_asset_id": raw_asset_id,
         "raw_r2_key": raw_r2_key,
         "ocr_asset_id": ocr_asset_id,
         "ocr_r2_key": output_r2_key,
-        "lines": len(lines)
+        "lines": len(lines),
+        "processing_time_ms": round(total_ms)
     })
     
-    logger.info(f"Job {job_id} completed successfully")
+    logger.info(f"[job={job_id}] Completed | ocr_asset_id={ocr_asset_id} | lines={len(lines)} | total={total_ms:.0f}ms (download={download_ms:.0f}ms, ocr={ocr_ms:.0f}ms, upload={upload_ms:.0f}ms)")
 
 def run_daemon(poll_seconds: int) -> None:
     """Main daemon loop that polls for and processes jobs."""

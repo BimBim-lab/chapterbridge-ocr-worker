@@ -34,7 +34,32 @@ Uses external Supabase with tables: pipeline_jobs, assets, segment_assets, segme
 ## Job Contract
 OCR jobs use job_type='clean' with input.task='ocr_page'
 
+## OCR Output Schema (ocr_v1)
+```json
+{
+  "version": "ocr_v1",
+  "engine": "paddleocr",
+  "source": {
+    "raw_asset_id": "uuid",
+    "raw_r2_key": "raw/manhwa/..."
+  },
+  "metadata": {
+    "work_id": "uuid",
+    "edition_id": "uuid", 
+    "segment_id": "uuid",
+    "chapter": 123,
+    "page": 1,
+    "source_key": "raw/manhwa/..."
+  },
+  "stats": { "line_count": 15 },
+  "lines": [{ "text": "...", "confidence": 0.98, "bbox": [...] }]
+}
+```
+
 ## Recent Changes
 - January 2026: Initial implementation of OCR worker
 - January 2026: Fixed PaddleOCR 3.x API compatibility (use_textline_orientation instead of use_angle_cls)
 - January 2026: Added required system libraries (libGL, libGLU, libgcc) for OpenCV/PaddlePaddle
+- January 2026: Implemented atomic job claiming with optimistic locking
+- January 2026: Added detailed logging with timing metrics
+- January 2026: Extended OCR output schema with version, engine, source fields
