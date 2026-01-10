@@ -36,3 +36,5 @@ OCR jobs use job_type='clean' with input.task='ocr_page'
 
 ## Recent Changes
 - January 2026: Initial implementation of OCR worker
+- January 2026: Fixed PaddleOCR 3.x API compatibility (use_textline_orientation instead of use_angle_cls)
+- January 2026: Added required system libraries (libGL, libGLU, libgcc) for OpenCV/PaddlePaddle

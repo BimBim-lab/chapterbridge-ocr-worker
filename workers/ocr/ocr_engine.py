@@ -23,10 +23,8 @@ def get_ocr_instance():
         use_angle_cls = os.environ.get("OCR_USE_ANGLE_CLS", "true").lower() == "true"
         
         _ocr_instance = PaddleOCR(
-            use_angle_cls=use_angle_cls,
             lang=lang,
-            use_gpu=False,
-            show_log=False
+            use_textline_orientation=use_angle_cls
         )
     
     return _ocr_instance

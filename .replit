@@ -4,7 +4,7 @@ expertMode = true
 
 [nix]
 channel = "stable-25_05"
-packages = ["openssl", "zlib"]
+packages = ["openssl", "zlib", "libGL", "libGLU", "xorg.libX11", "libgcc", "gcc"]
 
 [workflows]
 runButton = "Project"
