@@ -2,8 +2,14 @@
 Supabase client and database helper functions.
 """
 import os
+from datetime import datetime, timezone
 from typing import Optional, Dict, Any, List
 from supabase import create_client, Client
+
+
+def utc_now() -> str:
+    """Return current UTC time as ISO string for Supabase."""
+    return datetime.now(timezone.utc).isoformat()
 
 class SupabaseDB:
     """Database operations wrapper for Supabase."""
@@ -37,19 +43,20 @@ class SupabaseDB:
             return response.data[0]
         return None
     
-    def set_job_running(self, job_id: str, current_attempt: int) -> None:
+    def set_job_running(self, job_id: str, current_attempt: Optional[int]) -> None:
         """Mark job as running and increment attempt counter."""
+        attempt = (current_attempt or 0) + 1
         self.client.table("pipeline_jobs").update({
             "status": "running",
-            "started_at": "now()",
-            "attempt": current_attempt + 1
+            "started_at": utc_now(),
+            "attempt": attempt
         }).eq("id", job_id).execute()
     
     def set_job_success(self, job_id: str, output: Dict[str, Any]) -> None:
         """Mark job as success with output data."""
         self.client.table("pipeline_jobs").update({
             "status": "success",
-            "finished_at": "now()",
+            "finished_at": utc_now(),
             "output": output
         }).eq("id", job_id).execute()
     
@@ -57,7 +64,7 @@ class SupabaseDB:
         """Mark job as failed with error message."""
         self.client.table("pipeline_jobs").update({
             "status": "failed",
-            "finished_at": "now()",
+            "finished_at": utc_now(),
             "error": error[:10000]
         }).eq("id", job_id).execute()
     
