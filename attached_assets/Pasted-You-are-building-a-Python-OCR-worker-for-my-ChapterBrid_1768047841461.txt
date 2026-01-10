@@ -1,0 +1,195 @@
+You are building a Python OCR worker for my ChapterBridge pipeline (Supabase + Cloudflare R2). Generate the full codebase.
+
+IMPORTANT DB CONSTRAINTS (MUST FOLLOW)
+- Table pipeline_jobs.job_type has a CHECK constraint allowing ONLY:
+  'scrape','clean','summarize','entities','embed','match','sync_assets'
+  => DO NOT create a new job_type like "ocr".
+- For OCR tasks, use job_type='clean' and use pipeline_jobs.input to specify OCR intent.
+
+DATABASE TABLES (EXIST)
+assets:
+- id (uuid PK)
+- provider (default 'cloudflare_r2')
+- bucket (text)
+- r2_key (text UNIQUE)
+- asset_type (CHECK IN: 'raw_image','raw_subtitle','raw_html','ocr_json','cleaned_text','cleaned_json','other')
+- content_type, bytes, sha256
+- upload_source (CHECK IN: 'pipeline','manual','import')
+- created_at
+
+segment_assets:
+- segment_id (uuid FK segments.id)
+- asset_id (uuid FK assets.id)
+- role (text nullable)
+- created_at
+- PK(segment_id, asset_id)
+
+pipeline_jobs:
+- id (uuid PK)
+- job_type (CHECK IN list above)
+- status (queued|running|success|failed)
+- source_id, work_id, edition_id, segment_id (nullable)
+- input (jsonb), output (jsonb), attempt (int), error (text)
+- created_at, started_at, finished_at
+
+ENV VARS (Replit Secrets)
+SUPABASE_URL=...
+SUPABASE_SERVICE_ROLE_KEY=...
+R2_ENDPOINT=https://<accountid>.r2.cloudflarestorage.com
+R2_ACCESS_KEY_ID=...
+R2_SECRET_ACCESS_KEY=...
+R2_BUCKET=chapterbridge-data
+OCR_LANG=en          # default
+OCR_USE_ANGLE_CLS=true
+POLL_SECONDS=3
+
+R2 KEY CONVENTIONS
+Raw manhwa images are stored like:
+raw/manhwa/{work_id}/{edition_id}/chapter-0236/page-001.jpg
+
+OCR outputs must be written to:
+derived/manhwa/{work_id}/{edition_id}/chapter-0236/ocr/page-001.json
+- Keep the same chapter/page tokens from the raw key (including zero padding).
+- If raw key cannot be parsed, fallback output key:
+  derived/manhwa/unknown/unknown/ocr/{raw_asset_id}.json
+
+JOB CONTRACT FOR OCR (MUST IMPLEMENT)
+- OCR jobs are pipeline_jobs rows with:
+  job_type = 'clean'
+  status = 'queued'
+  input.task = 'ocr_page'
+  input.raw_asset_id = '<uuid of assets row where asset_type=raw_image>'
+Optional fields:
+  input.force = true|false (force re-run even if output exists)
+
+Example pipeline_jobs.input:
+{
+  "task": "ocr_page",
+  "raw_asset_id": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+  "force": false
+}
+
+WORKER RESPONSIBILITIES
+1) Poll for ONE queued OCR job:
+   SELECT * FROM pipeline_jobs
+   WHERE status='queued'
+     AND job_type='clean'
+     AND (input->>'task')='ocr_page'
+   ORDER BY created_at ASC
+   LIMIT 1;
+
+2) Set job to running:
+   status='running', started_at=NOW(), attempt=attempt+1
+
+3) Load raw asset:
+   SELECT * FROM assets WHERE id=<raw_asset_id>;
+   Validate asset_type='raw_image' and r2_key not null.
+
+4) Resolve segment_id:
+   - Prefer pipeline_jobs.segment_id if not null.
+   - Else lookup:
+     SELECT segment_id FROM segment_assets WHERE asset_id=<raw_asset_id> LIMIT 1;
+   If still missing => fail job with clear error.
+
+5) Resolve work_id and edition_id:
+   - Prefer pipeline_jobs.work_id and pipeline_jobs.edition_id if present.
+   - Else parse from raw r2_key (raw/manhwa/{work_id}/{edition_id}/chapter-...).
+   - Else query:
+     SELECT s.edition_id, e.work_id
+     FROM segments s JOIN editions e ON s.edition_id=e.id
+     WHERE s.id=<segment_id>;
+
+6) Idempotency:
+   - Compute output_r2_key from raw r2_key.
+   - If NOT force:
+     - Check if assets already has r2_key=output_r2_key (maybeSingle).
+       If exists:
+         - Ensure segment_assets link exists (segment_id, asset_id) with role='ocr_json' (constant).
+         - Mark job success with output={"skipped":true,"reason":"already_exists","ocr_asset_id":...}
+         - Do NOT re-run OCR.
+
+7) Download raw image from R2 using boto3 S3 client:
+   GetObject(bucket=R2_BUCKET, key=raw_r2_key) -> bytes
+
+8) OCR using PaddleOCR (CPU):
+   - Initialize PaddleOCR once (singleton) for performance:
+     PaddleOCR(use_angle_cls=True, lang=OCR_LANG)
+   - Run OCR and normalize result to list of lines:
+     lines: [{ "text": "...", "confidence": 0.98, "bbox": [[x1,y1],[x2,y2],[x3,y3],[x4,y4]] }, ...]
+   - Add metadata: work_id, edition_id, segment_id, chapter number, page number if parsed.
+   - Stats: line count.
+
+9) Upload OCR JSON to R2:
+   PutObject(bucket=R2_BUCKET, key=output_r2_key, body=json_bytes, ContentType='application/json')
+
+10) Insert OCR asset row in Supabase:
+   INSERT INTO assets:
+     provider='cloudflare_r2'
+     bucket=R2_BUCKET
+     r2_key=output_r2_key
+     asset_type='ocr_json'
+     content_type='application/json'
+     bytes=len(json_bytes)
+     sha256=sha256(json_bytes)
+     upload_source='pipeline'
+   Return inserted id as ocr_asset_id.
+
+11) Link OCR asset to segment via segment_assets:
+   INSERT INTO segment_assets(segment_id, asset_id, role)
+   VALUES(segment_id, ocr_asset_id, 'ocr_json')
+   If conflict (already exists), ignore.
+
+12) Mark job success:
+   pipeline_jobs.status='success'
+   finished_at=NOW()
+   output JSON like:
+   {
+     "task":"ocr_page",
+     "raw_asset_id":"...",
+     "raw_r2_key":"...",
+     "ocr_asset_id":"...",
+     "ocr_r2_key":"...",
+     "lines":123
+   }
+
+13) Error handling:
+   On any exception:
+   - status='failed'
+   - finished_at=NOW()
+   - error='<message + stack>'
+   Worker must continue looping; do not crash the daemon.
+
+OPTIONAL: ENQUEUE SCRIPT (HIGHLY USEFUL)
+Create a helper script that creates OCR jobs for raw images:
+- Input: --edition-id <uuid> OR --prefix raw/manhwa/... OR --limit N
+- Find candidate raw_image assets that do not yet have a derived ocr_json asset for the expected output key.
+- Insert into pipeline_jobs:
+  job_type='clean', status='queued', edition_id=<...>, segment_id=<... if resolvable>,
+  input={"task":"ocr_page","raw_asset_id":"...","force":false}
+
+CODEBASE DELIVERABLES
+Create this structure:
+
+workers/ocr/
+  main.py                # daemon loop poller
+  enqueue.py             # optional job creator
+  supabase_client.py     # supabase init + DB helpers
+  r2_client.py           # boto3 R2 get/put/head
+  ocr_engine.py          # PaddleOCR singleton + normalize output
+  key_parser.py          # parse raw r2_key -> work_id/edition_id/chapter/page + build output key
+  utils.py               # sha256, json dumps, logging
+requirements.txt
+README.md                # setup + how to run
+
+RUN INSTRUCTIONS (IN README)
+- pip install -r requirements.txt
+- python workers/ocr/enqueue.py --edition-id <...> --limit 500
+- python workers/ocr/main.py --poll-seconds 3
+
+NON-FUNCTIONAL REQUIREMENTS
+- Do NOT re-initialize PaddleOCR per job (too slow).
+- Use minimal memory; process one job at a time.
+- Add clear logs: job_id, raw_asset_id, segment_id, output_r2_key.
+- Must work without public URLs; ONLY use R2 S3 API and Supabase.
+
+Now generate the complete implementation with robust, production-like code and comments.
