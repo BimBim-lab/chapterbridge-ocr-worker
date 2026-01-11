@@ -124,34 +124,46 @@ def process_job(db: SupabaseDB, r2: R2Client, job: dict) -> None:
     download_ms = elapsed_ms(download_start)
     logger.info(f"[job={job_id}] Downloaded {len(image_bytes)} bytes in {download_ms:.0f}ms")
     
-    # Use enhanced tiling OCR by default
+    # OCR execution
     ocr_start = datetime.now(timezone.utc)
     debug_dir = os.environ.get("OCR_DEBUG_DIR")
     
-    # Determine whether to use tiling based on image size
-    use_tiling = os.environ.get("OCR_USE_TILING", "auto").lower()
+    # Check if adaptive mode is enabled
+    use_adaptive = os.environ.get("OCR_ADAPTIVE", "false").lower() == "true"
     
     try:
-        if use_tiling == "always":
-            logger.info(f"[job={job_id}] Force tiling mode")
-            lines = run_ocr_with_tiling(image_bytes, debug_dir=debug_dir)
-        elif use_tiling == "never":
-            logger.info(f"[job={job_id}] Standard OCR mode")
-            lines = run_ocr(image_bytes)
-        else:  # auto (default)
-            # Quick check of image dimensions
-            from PIL import Image
-            from io import BytesIO
-            img = Image.open(BytesIO(image_bytes))
-            width, height = img.size
+        if use_adaptive:
+            # Adaptive OCR: automatically chooses best strategy based on image dimensions
+            logger.info(f"[job={job_id}] Using adaptive OCR mode")
+            from workers.ocr.ocr_engine import run_ocr_adaptive
+            lines = run_ocr_adaptive(image_bytes)
+        else:
+            # Legacy mode: use tiling configuration
+            use_tiling = os.environ.get("OCR_USE_TILING", "auto").lower()
             
-            # Use tiling for tall images (height > 2000px)
-            if height > 2000:
-                logger.info(f"[job={job_id}] Auto-enabling tiling for tall image ({width}x{height})")
+            if use_tiling == "always":
+                logger.info(f"[job={job_id}] Force tiling mode")
+                from workers.ocr.ocr_engine import run_ocr_with_tiling
                 lines = run_ocr_with_tiling(image_bytes, debug_dir=debug_dir)
-            else:
-                logger.info(f"[job={job_id}] Using standard OCR for normal image ({width}x{height})")
+            elif use_tiling == "never":
+                logger.info(f"[job={job_id}] Standard OCR mode")
+                from workers.ocr.ocr_engine import run_ocr
                 lines = run_ocr(image_bytes)
+            else:  # auto (default)
+                # Quick check of image dimensions
+                from PIL import Image
+                from io import BytesIO
+                from workers.ocr.ocr_engine import run_ocr, run_ocr_with_tiling
+                img = Image.open(BytesIO(image_bytes))
+                width, height = img.size
+                
+                # Use tiling for tall images (height > 2000px)
+                if height > 2000:
+                    logger.info(f"[job={job_id}] Auto-enabling tiling for tall image ({width}x{height})")
+                    lines = run_ocr_with_tiling(image_bytes, debug_dir=debug_dir)
+                else:
+                    logger.info(f"[job={job_id}] Using standard OCR for normal image ({width}x{height})")
+                    lines = run_ocr(image_bytes)
     except Exception as e:
         logger.error(f"[job={job_id}] OCR failed: {str(e)}\n{traceback.format_exc()}")
         raise
