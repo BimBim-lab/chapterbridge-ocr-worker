@@ -23,7 +23,7 @@ load_dotenv()
 from workers.ocr.utils import setup_logging, compute_sha256, json_dumps
 from workers.ocr.supabase_client import SupabaseDB
 from workers.ocr.r2_client import R2Client
-from workers.ocr.ocr_engine import run_ocr, build_ocr_output
+from workers.ocr.ocr_engine import run_ocr, run_ocr_with_tiling, build_ocr_output
 from workers.ocr.key_parser import (
     parse_raw_key, 
     build_output_key, 
@@ -124,8 +124,38 @@ def process_job(db: SupabaseDB, r2: R2Client, job: dict) -> None:
     download_ms = elapsed_ms(download_start)
     logger.info(f"[job={job_id}] Downloaded {len(image_bytes)} bytes in {download_ms:.0f}ms")
     
+    # Use enhanced tiling OCR by default
     ocr_start = datetime.now(timezone.utc)
-    lines = run_ocr(image_bytes)
+    debug_dir = os.environ.get("OCR_DEBUG_DIR")
+    
+    # Determine whether to use tiling based on image size
+    use_tiling = os.environ.get("OCR_USE_TILING", "auto").lower()
+    
+    try:
+        if use_tiling == "always":
+            logger.info(f"[job={job_id}] Force tiling mode")
+            lines = run_ocr_with_tiling(image_bytes, debug_dir=debug_dir)
+        elif use_tiling == "never":
+            logger.info(f"[job={job_id}] Standard OCR mode")
+            lines = run_ocr(image_bytes)
+        else:  # auto (default)
+            # Quick check of image dimensions
+            from PIL import Image
+            from io import BytesIO
+            img = Image.open(BytesIO(image_bytes))
+            width, height = img.size
+            
+            # Use tiling for tall images (height > 2000px)
+            if height > 2000:
+                logger.info(f"[job={job_id}] Auto-enabling tiling for tall image ({width}x{height})")
+                lines = run_ocr_with_tiling(image_bytes, debug_dir=debug_dir)
+            else:
+                logger.info(f"[job={job_id}] Using standard OCR for normal image ({width}x{height})")
+                lines = run_ocr(image_bytes)
+    except Exception as e:
+        logger.error(f"[job={job_id}] OCR failed: {str(e)}\n{traceback.format_exc()}")
+        raise
+    
     ocr_ms = elapsed_ms(ocr_start)
     logger.info(f"[job={job_id}] OCR complete: {len(lines)} lines in {ocr_ms:.0f}ms")
     
@@ -204,6 +234,10 @@ def run_daemon(poll_seconds: int) -> None:
         except KeyboardInterrupt:
             logger.info("Shutting down...")
             break
+        except Exception as e:
+            logger.error(f"Daemon error: {str(e)}\n{traceback.format_exc()}")
+            logger.info(f"Retrying in {poll_seconds}s...")
+            time.sleep(poll_seconds)
         except Exception as e:
             logger.error(f"Daemon error: {e}")
             time.sleep(poll_seconds)
