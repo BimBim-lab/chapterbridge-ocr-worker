@@ -21,66 +21,44 @@ DEBUG_DIR = os.environ.get("OCR_DEBUG_DIR", "debug")
 
 def get_ocr_instance():
     """
-    Get or create singleton PaddleOCR instance with configurable parameters.
+    Get or create singleton PaddleOCR instance optimized for webtoon OCR.
     PaddleOCR 3.x auto-detects GPU availability (CPU for dev, GPU for RunPod).
-    All detection thresholds can be overridden via environment variables.
+    Uses PP-OCRv5 with hardcoded optimal settings for speed and accuracy.
     """
     global _ocr_instance
     
     if _ocr_instance is None:
         from paddleocr import PaddleOCR
         
-        # === Model Selection (PP-OCRv5) ===
-        ocr_version = os.environ.get("OCR_VERSION", "PP-OCRv5")
-        
-        # Custom model paths (optional)
-        text_detection_model_dir = os.environ.get("OCR_DET_MODEL_DIR", None) or None
-        text_recognition_model_dir = os.environ.get("OCR_REC_MODEL_DIR", None) or None
-        
-        # === Language Support ===
-        lang = os.environ.get("OCR_LANG", "en")
-        use_angle_cls = os.environ.get("OCR_USE_ANGLE_CLS", "false").lower() == "true"
-        
-        # === Detection Parameters ===
-        text_det_limit_side_len = int(os.environ.get("OCR_DET_LIMIT_SIDE_LEN", "2048"))
-        text_det_thresh = float(os.environ.get("OCR_DET_THRESH", "0.15"))
-        text_det_box_thresh = float(os.environ.get("OCR_DET_BOX_THRESH", "0.35"))
-        text_det_unclip_ratio = float(os.environ.get("OCR_DET_UNCLIP_RATIO", "2.5"))
-        
-        # === Recognition Parameters ===
-        text_recognition_batch_size = int(os.environ.get("OCR_REC_BATCH_NUM", "6"))
-        text_rec_score_thresh = float(os.environ.get("OCR_DROP_SCORE", "0.3"))
-        
-        # === Advanced Features (PaddleOCR 3.x) ===
-        use_doc_orientation_classify = os.environ.get("OCR_USE_DOC_ORIENTATION", "false").lower() == "true"
-        use_doc_unwarping = os.environ.get("OCR_USE_DOC_UNWARPING", "false").lower() == "true"
-        use_textline_orientation = os.environ.get("OCR_USE_TEXTLINE_ORIENTATION", "false").lower() == "true"
-        return_word_box = os.environ.get("OCR_RETURN_WORD_BOX", "false").lower() == "true"
-        
         # Build PaddleOCR initialization parameters (PaddleOCR 3.x API)
-        # Note: GPU is auto-detected (CPU for dev, GPU for RunPod production)
-        # Note: Document preprocessing features (doc orientation, unwarping, textline orientation)
-        # are NOT set to avoid UVDoc compatibility issues - they stay disabled by default
+        # Optimized for webtoon text: English language, GPU acceleration, high throughput
         ocr_params = {
-            "lang": lang,
-            "use_angle_cls": use_angle_cls,
-            "text_det_limit_side_len": text_det_limit_side_len,
+            # Model & Language
+            "ocr_version": "PP-OCRv5",
+            "lang": "en",
+            "use_angle_cls": False,  # Webtoons are not rotated
+            
+            # Detection Parameters (optimized for GPU)
+            "text_det_limit_side_len": 4096,  # GPU can handle large images
             "text_det_limit_type": "max",
-            "text_det_thresh": text_det_thresh,
-            "text_det_box_thresh": text_det_box_thresh,
-            "text_det_unclip_ratio": text_det_unclip_ratio,
-            "text_recognition_batch_size": text_recognition_batch_size,
-            "text_rec_score_thresh": text_rec_score_thresh,
-            "return_word_box": return_word_box,
+            "text_det_thresh": 0.15,  # Lower = more sensitive
+            "text_det_box_thresh": 0.35,
+            "text_det_unclip_ratio": 2.5,
+            
+            # Recognition Parameters (batch processing for speed)
+            "text_recognition_batch_size": 6,  # Process 6 text regions at once
+            "text_rec_score_thresh": 0.3,
+            
+            # Advanced settings
+            "return_word_box": False,
+            "show_log": False,
+            
+            # CRITICAL: Explicitly disable document preprocessor per official PaddleOCR docs
+            # Reference: https://github.com/PaddlePaddle/PaddleOCR#3-run-inference-by-cli
+            "use_doc_orientation_classify": False,
+            "use_doc_unwarping": False,
+            "use_textline_orientation": False,
         }
-        
-        # Add optional parameters if set
-        if ocr_version and ocr_version != "default":
-            ocr_params["ocr_version"] = ocr_version
-        if text_detection_model_dir:
-            ocr_params["text_detection_model_dir"] = text_detection_model_dir
-        if text_recognition_model_dir:
-            ocr_params["text_recognition_model_dir"] = text_recognition_model_dir
         
         _ocr_instance = PaddleOCR(**ocr_params)
         
@@ -92,7 +70,7 @@ def get_ocr_instance():
         except:
             gpu_status = "CPU (GPU check failed)"
         
-        logger.info(f"PaddleOCR initialized: {gpu_status}")
+        logger.info(f"PaddleOCR initialized: {gpu_status}, PP-OCRv5")
         logger.info(f"Model: {ocr_version}, Language: {lang}, Angle Cls: {use_angle_cls}")
         logger.info(f"Detection: thresh={text_det_thresh}, box_thresh={text_det_box_thresh}, unclip={text_det_unclip_ratio}")
         logger.info(f"Recognition: batch={text_recognition_batch_size}, score_thresh={text_rec_score_thresh}")
