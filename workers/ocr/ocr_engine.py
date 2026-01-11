@@ -59,7 +59,7 @@ def get_ocr_instance():
         
         # Build PaddleOCR initialization parameters (PaddleOCR 3.x API)
         # Note: GPU is auto-detected (CPU for dev, GPU for RunPod production)
-        # Document preprocessing features not enabled (avoids UVDoc compatibility issues)
+        # CRITICAL: Explicitly disable document preprocessing to avoid UVDoc compatibility issues
         ocr_params = {
             "lang": lang,
             "use_angle_cls": use_angle_cls,
@@ -71,6 +71,10 @@ def get_ocr_instance():
             "text_recognition_batch_size": text_recognition_batch_size,
             "text_rec_score_thresh": text_rec_score_thresh,
             "return_word_box": return_word_box,
+            # Explicitly disable document preprocessor features (defaults may enable them)
+            "use_doc_orientation_classify": False,
+            "use_doc_unwarping": False,
+            "use_textline_orientation": False,
         }
         
         # Add optional parameters if set
@@ -80,12 +84,6 @@ def get_ocr_instance():
             ocr_params["text_detection_model_dir"] = text_detection_model_dir
         if text_recognition_model_dir:
             ocr_params["text_recognition_model_dir"] = text_recognition_model_dir
-        if use_doc_orientation_classify:
-            ocr_params["use_doc_orientation_classify"] = use_doc_orientation_classify
-        if use_doc_unwarping:
-            ocr_params["use_doc_unwarping"] = use_doc_unwarping
-        if use_textline_orientation:
-            ocr_params["use_textline_orientation"] = use_textline_orientation
         
         _ocr_instance = PaddleOCR(**ocr_params)
         
