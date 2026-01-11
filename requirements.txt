@@ -1,8 +1,18 @@
-paddleocr>=2.7.0
-paddlepaddle>=2.5.0
+# PaddleOCR 3.0+ with PP-OCRv5 support
+paddleocr>=3.0.0
+# Note: For GPU, install via: 
+#   pip install paddlepaddle-gpu==3.0.0.b2 -i https://www.paddlepaddle.org.cn/packages/stable/cu118/
+paddlepaddle>=3.0.0
+
+# Cloud Storage & Database
 boto3>=1.28.0
 supabase>=2.0.0
+
+# Core Dependencies
 python-dotenv>=1.0.0
 Pillow>=10.0.0
 numpy>=1.24.0
 opencv-python>=4.8.0
+
+# Optional: TensorRT for 5x speedup (requires manual installation)
+# tensorrt==8.6.1

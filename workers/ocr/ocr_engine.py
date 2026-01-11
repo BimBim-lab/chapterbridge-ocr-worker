@@ -22,6 +22,7 @@ DEBUG_DIR = os.environ.get("OCR_DEBUG_DIR", "debug")
 def get_ocr_instance():
     """
     Get or create singleton PaddleOCR instance with configurable parameters.
+    PaddleOCR 3.x auto-detects GPU availability (CPU for dev, GPU for RunPod).
     All detection thresholds can be overridden via environment variables.
     """
     global _ocr_instance
@@ -29,25 +30,76 @@ def get_ocr_instance():
     if _ocr_instance is None:
         from paddleocr import PaddleOCR
         
+        # === Model Selection (PP-OCRv5) ===
+        ocr_version = os.environ.get("OCR_VERSION", "PP-OCRv5")
+        
+        # Custom model paths (optional)
+        text_detection_model_dir = os.environ.get("OCR_DET_MODEL_DIR", None) or None
+        text_recognition_model_dir = os.environ.get("OCR_REC_MODEL_DIR", None) or None
+        
+        # === Language Support ===
         lang = os.environ.get("OCR_LANG", "en")
-        use_angle_cls = os.environ.get("OCR_USE_ANGLE_CLS", "true").lower() == "true"
-        det_limit_side_len = int(os.environ.get("OCR_DET_LIMIT_SIDE_LEN", "2560"))
-        det_thresh = float(os.environ.get("OCR_DET_THRESH", "0.15"))
-        det_box_thresh = float(os.environ.get("OCR_DET_BOX_THRESH", "0.35"))
-        det_unclip_ratio = float(os.environ.get("OCR_DET_UNCLIP_RATIO", "2.5"))
+        use_angle_cls = os.environ.get("OCR_USE_ANGLE_CLS", "false").lower() == "true"
         
-        _ocr_instance = PaddleOCR(
-            use_angle_cls=use_angle_cls,
-            lang=lang,
-            text_det_limit_side_len=det_limit_side_len,
-            text_det_limit_type='max',
-            text_det_thresh=det_thresh,
-            text_det_box_thresh=det_box_thresh,
-            text_det_unclip_ratio=det_unclip_ratio
-        )
+        # === Detection Parameters ===
+        text_det_limit_side_len = int(os.environ.get("OCR_DET_LIMIT_SIDE_LEN", "2048"))
+        text_det_thresh = float(os.environ.get("OCR_DET_THRESH", "0.15"))
+        text_det_box_thresh = float(os.environ.get("OCR_DET_BOX_THRESH", "0.35"))
+        text_det_unclip_ratio = float(os.environ.get("OCR_DET_UNCLIP_RATIO", "2.5"))
         
-        logger.info(f"PaddleOCR initialized: lang={lang}, det_thresh={det_thresh}, "
-                   f"box_thresh={det_box_thresh}, unclip={det_unclip_ratio}")
+        # === Recognition Parameters ===
+        text_recognition_batch_size = int(os.environ.get("OCR_REC_BATCH_NUM", "6"))
+        text_rec_score_thresh = float(os.environ.get("OCR_DROP_SCORE", "0.3"))
+        
+        # === Advanced Features (PaddleOCR 3.x) ===
+        use_doc_orientation_classify = os.environ.get("OCR_USE_DOC_ORIENTATION", "false").lower() == "true"
+        use_doc_unwarping = os.environ.get("OCR_USE_DOC_UNWARPING", "false").lower() == "true"
+        use_textline_orientation = os.environ.get("OCR_USE_TEXTLINE_ORIENTATION", "false").lower() == "true"
+        return_word_box = os.environ.get("OCR_RETURN_WORD_BOX", "false").lower() == "true"
+        
+        # Build PaddleOCR initialization parameters (PaddleOCR 3.x API)
+        # Note: GPU is auto-detected (CPU for dev, GPU for RunPod production)
+        ocr_params = {
+            "lang": lang,
+            "use_angle_cls": use_angle_cls,
+            "text_det_limit_side_len": text_det_limit_side_len,
+            "text_det_limit_type": "max",
+            "text_det_thresh": text_det_thresh,
+            "text_det_box_thresh": text_det_box_thresh,
+            "text_det_unclip_ratio": text_det_unclip_ratio,
+            "text_recognition_batch_size": text_recognition_batch_size,
+            "text_rec_score_thresh": text_rec_score_thresh,
+            "return_word_box": return_word_box,
+        }
+        
+        # Add optional parameters if set
+        if ocr_version and ocr_version != "default":
+            ocr_params["ocr_version"] = ocr_version
+        if text_detection_model_dir:
+            ocr_params["text_detection_model_dir"] = text_detection_model_dir
+        if text_recognition_model_dir:
+            ocr_params["text_recognition_model_dir"] = text_recognition_model_dir
+        if use_doc_orientation_classify:
+            ocr_params["use_doc_orientation_classify"] = use_doc_orientation_classify
+        if use_doc_unwarping:
+            ocr_params["use_doc_unwarping"] = use_doc_unwarping
+        if use_textline_orientation:
+            ocr_params["use_textline_orientation"] = use_textline_orientation
+        
+        _ocr_instance = PaddleOCR(**ocr_params)
+        
+        # Check GPU availability and log
+        try:
+            import paddle
+            gpu_available = paddle.device.cuda.device_count() > 0
+            gpu_status = f"GPU (detected {paddle.device.cuda.device_count()} device(s))" if gpu_available else "CPU"
+        except:
+            gpu_status = "CPU (GPU check failed)"
+        
+        logger.info(f"PaddleOCR initialized: {gpu_status}")
+        logger.info(f"Model: {ocr_version}, Language: {lang}, Angle Cls: {use_angle_cls}")
+        logger.info(f"Detection: thresh={text_det_thresh}, box_thresh={text_det_box_thresh}, unclip={text_det_unclip_ratio}")
+        logger.info(f"Recognition: batch={text_recognition_batch_size}, score_thresh={text_rec_score_thresh}")
     
     return _ocr_instance
 
