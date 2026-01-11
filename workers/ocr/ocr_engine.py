@@ -1,8 +1,8 @@
 """
-PaddleOCR engine singleton with result normalization.
+PaddleOCR engine wrapper with singleton pattern.
 """
 import os
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any
 from io import BytesIO
 from PIL import Image
 import numpy as np
@@ -21,10 +21,16 @@ def get_ocr_instance():
         
         lang = os.environ.get("OCR_LANG", "en")
         use_angle_cls = os.environ.get("OCR_USE_ANGLE_CLS", "true").lower() == "true"
+        det_limit_side_len = int(os.environ.get("OCR_DET_LIMIT_SIDE_LEN", "2560"))
         
         _ocr_instance = PaddleOCR(
             use_angle_cls=use_angle_cls,
-            lang=lang
+            lang=lang,
+            text_det_limit_side_len=det_limit_side_len,
+            text_det_limit_type='max',
+            text_det_thresh=0.15,
+            text_det_box_thresh=0.35,
+            text_det_unclip_ratio=2.5
         )
     
     return _ocr_instance
@@ -51,45 +57,83 @@ def run_ocr(image_bytes: bytes) -> List[Dict[str, Any]]:
     
     img_array = np.array(image)
     
-    result = ocr.ocr(img_array, cls=True)
+    result = ocr.ocr(img_array)
     
     lines = []
     
-    if result and result[0]:
-        for line in result[0]:
-            if line and len(line) >= 2:
-                bbox = line[0]
-                text_info = line[1]
+    # PaddleOCR 3.x returns OCRResult object
+    if result and len(result) > 0:
+        ocr_result = result[0]
+        
+        # Access as dict-like object
+        if hasattr(ocr_result, '__getitem__'):
+            try:
+                rec_texts = ocr_result.get('rec_texts', []) if hasattr(ocr_result, 'get') else (ocr_result['rec_texts'] if 'rec_texts' in ocr_result else [])
+                rec_scores = ocr_result.get('rec_scores', []) if hasattr(ocr_result, 'get') else (ocr_result['rec_scores'] if 'rec_scores' in ocr_result else [])
+                rec_polys = ocr_result.get('rec_polys', []) if hasattr(ocr_result, 'get') else (ocr_result['rec_polys'] if 'rec_polys' in ocr_result else [])
                 
-                if isinstance(text_info, (list, tuple)) and len(text_info) >= 2:
-                    text = str(text_info[0])
-                    confidence = float(text_info[1])
-                else:
-                    text = str(text_info)
-                    confidence = 0.0
-                
-                bbox_formatted = [[float(pt[0]), float(pt[1])] for pt in bbox]
-                
-                lines.append({
-                    "text": text,
-                    "confidence": round(confidence, 4),
-                    "bbox": bbox_formatted
-                })
+                # Combine texts, scores, and bboxes
+                for i in range(len(rec_texts)):
+                    text = rec_texts[i]
+                    confidence = rec_scores[i] if i < len(rec_scores) else 0.0
+                    bbox = rec_polys[i] if i < len(rec_polys) else None
+                    
+                    # Format bbox as [[x,y], [x,y], [x,y], [x,y]]
+                    bbox_formatted = []
+                    try:
+                        if bbox is not None and hasattr(bbox, '__len__') and len(bbox) >= 4:
+                            for pt in bbox[:4]:
+                                if hasattr(pt, '__getitem__') and len(pt) >= 2:
+                                    bbox_formatted.append([float(pt[0]), float(pt[1])])
+                            
+                            if len(bbox_formatted) == 4:
+                                lines.append({
+                                    "text": str(text),
+                                    "confidence": round(float(confidence), 4),
+                                    "bbox": bbox_formatted
+                                })
+                    except (ValueError, TypeError, IndexError):
+                        continue
+                        
+            except (KeyError, TypeError):
+                pass
     
     return lines
 
 def build_ocr_output(
     lines: List[Dict[str, Any]],
-    work_id: Optional[str],
-    edition_id: Optional[str],
-    segment_id: Optional[str],
-    chapter: Optional[int],
-    page: Optional[int],
-    raw_r2_key: str,
-    raw_asset_id: Optional[str] = None
+    work_id: str,
+    edition_id: str,
+    segment_id: str,
+    chapter: int = None,
+    page: int = None,
+    raw_r2_key: str = None,
+    raw_asset_id: str = None
 ) -> Dict[str, Any]:
     """
-    Build the full OCR JSON output with metadata.
+    Build OCR output JSON structure.
+    
+    Returns:
+    {
+        "version": "ocr_v1",
+        "engine": "paddleocr",
+        "source": {
+            "raw_asset_id": "uuid",
+            "raw_r2_key": "raw/..."
+        },
+        "metadata": {
+            "work_id": "uuid",
+            "edition_id": "uuid",
+            "segment_id": "uuid",
+            "chapter": 1,
+            "page": 1,
+            "source_key": "raw/..."
+        },
+        "stats": {
+            "line_count": 46
+        },
+        "lines": [...]
+    }
     """
     return {
         "version": "ocr_v1",
