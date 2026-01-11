@@ -343,149 +343,6 @@ def run_ocr(image_bytes: bytes) -> List[Dict[str, Any]]:
     return lines
 
 
-def merge_nearby_lines(lines: List[Dict[str, Any]], 
-                       vertical_threshold: Optional[float] = None,
-                       horizontal_overlap_threshold: float = 0.3) -> List[Dict[str, Any]]:
-    """
-    Merge text lines that are close together (likely in same speech bubble).
-    
-    This is critical for webtoon/manhwa where one speech bubble often contains
-    multiple detected lines that should be merged into one logical text block.
-    
-    Args:
-        lines: List of OCR results with bbox and text
-        vertical_threshold: Max vertical distance to merge (default: 1.5x box height)
-        horizontal_overlap_threshold: Min horizontal overlap ratio to merge (0-1)
-        
-    Returns:
-        List of merged lines with combined text
-    """
-    if len(lines) <= 1:
-        return lines
-    
-    # Check if merging is enabled
-    merge_enabled = os.environ.get("OCR_MERGE_NEARBY", "true").lower() == "true"
-    if not merge_enabled:
-        return lines
-    
-    # Sort by Y position (top to bottom)
-    sorted_lines = sorted(lines, key=lambda x: min(p[1] for p in x['bbox']))
-    
-    merged = []
-    skip_indices = set()
-    
-    for i, line1 in enumerate(sorted_lines):
-        if i in skip_indices:
-            continue
-        
-        # Get bbox bounds for line1
-        x1_min = min(p[0] for p in line1['bbox'])
-        y1_min = min(p[1] for p in line1['bbox'])
-        x1_max = max(p[0] for p in line1['bbox'])
-        y1_max = max(p[1] for p in line1['bbox'])
-        box1_height = y1_max - y1_min
-        box1_width = x1_max - x1_min
-        
-        # Default vertical threshold: 1.5x box height
-        if vertical_threshold is None:
-            v_thresh = float(os.environ.get("OCR_MERGE_DISTANCE_THRESHOLD", "1.5")) * box1_height
-        else:
-            v_thresh = vertical_threshold
-        
-        # Start group with current line
-        group = [line1]
-        group_indices = [i]
-        
-        # Look for nearby lines to merge
-        for j in range(i + 1, len(sorted_lines)):
-            if j in skip_indices:
-                continue
-            
-            line2 = sorted_lines[j]
-            
-            # Get bbox bounds for line2
-            x2_min = min(p[0] for p in line2['bbox'])
-            y2_min = min(p[1] for p in line2['bbox'])
-            x2_max = max(p[0] for p in line2['bbox'])
-            y2_max = max(p[1] for p in line2['bbox'])
-            
-            # Check vertical distance (from bottom of line1 to top of line2)
-            vertical_distance = y2_min - y1_max
-            
-            # Stop if too far below
-            if vertical_distance > v_thresh:
-                break
-            
-            # Check horizontal overlap
-            overlap_start = max(x1_min, x2_min)
-            overlap_end = min(x1_max, x2_max)
-            overlap_width = max(0, overlap_end - overlap_start)
-            
-            # Calculate overlap ratio (relative to smaller box width)
-            min_width = min(box1_width, x2_max - x2_min)
-            overlap_ratio = overlap_width / min_width if min_width > 0 else 0
-            
-            # Merge if close vertically AND horizontally overlapping
-            if vertical_distance <= v_thresh and overlap_ratio >= horizontal_overlap_threshold:
-                group.append(line2)
-                group_indices.append(j)
-                
-                # Update bounds for next comparison
-                y1_max = max(y1_max, y2_max)
-                x1_min = min(x1_min, x2_min)
-                x1_max = max(x1_max, x2_max)
-        
-        # Mark group members as processed
-        for idx in group_indices:
-            skip_indices.add(idx)
-        
-        # Merge group into single line
-        if len(group) == 1:
-            # No merge needed
-            merged.append(group[0])
-        else:
-            # Merge multiple lines
-            merged_text = " ".join(line['text'] for line in group)
-            avg_confidence = sum(line['confidence'] for line in group) / len(group)
-            
-            # Create merged bbox (bounding rectangle of all boxes)
-            all_points = []
-            for line in group:
-                all_points.extend(line['bbox'])
-            
-            merged_x_min = min(p[0] for p in all_points)
-            merged_y_min = min(p[1] for p in all_points)
-            merged_x_max = max(p[0] for p in all_points)
-            merged_y_max = max(p[1] for p in all_points)
-            
-            merged_bbox = [
-                [merged_x_min, merged_y_min],
-                [merged_x_max, merged_y_min],
-                [merged_x_max, merged_y_max],
-                [merged_x_min, merged_y_max]
-            ]
-            
-            merged_line = {
-                "text": merged_text,
-                "confidence": round(avg_confidence, 4),
-                "bbox": merged_bbox,
-                "merged_from": len(group)  # Metadata: how many lines were merged
-            }
-            
-            # Preserve any additional metadata from first line
-            for key in group[0]:
-                if key not in ['text', 'confidence', 'bbox']:
-                    merged_line[key] = group[0][key]
-            
-            merged.append(merged_line)
-    
-    if DEBUG_MODE and len(merged) < len(lines):
-        logger.info(f"[MERGE] Merged {len(lines)} lines → {len(merged)} bubbles "
-                   f"({len(lines) - len(merged)} merges)")
-    
-    return merged
-
-
 def preprocess_clahe(image: Image.Image) -> Image.Image:
     """
     Apply CLAHE preprocessing for better text detection on low-contrast images.
@@ -677,20 +534,15 @@ def run_ocr_adaptive(image_bytes: bytes) -> List[Dict[str, Any]]:
     if plan['strategy'] == 'NO_TILE':
         lines = _run_ocr_on_image(image)
         
+        if DEBUG_MODE:
+            logger.info(f"[ADAPTIVE] NO_TILE: {len(lines)} lines detected in {time.time() - start_time:.1f}s")
+            if lines:
+                debug_path = os.path.join(DEBUG_DIR, f"notile_{int(time.time())}.jpg")
+                draw_debug_boxes(image, lines, debug_path, f"NO_TILE: {len(lines)} lines")
+        
         # Sort by position
         lines.sort(key=lambda x: (min(p[1] for p in x['bbox']), min(p[0] for p in x['bbox'])))
-        
-        # Merge nearby lines (combine text in same bubble)
-        merged = merge_nearby_lines(lines)
-        
-        if DEBUG_MODE:
-            logger.info(f"[ADAPTIVE] NO_TILE: {len(lines)} lines → {len(merged)} bubbles "
-                       f"in {time.time() - start_time:.1f}s")
-            if merged:
-                debug_path = os.path.join(DEBUG_DIR, f"notile_{int(time.time())}.jpg")
-                draw_debug_boxes(image, merged, debug_path, f"NO_TILE: {len(merged)} bubbles")
-        
-        return merged
+        return lines
     
     # TILE strategy
     tile_height = plan['tile_height']
@@ -821,27 +673,19 @@ def run_ocr_adaptive(image_bytes: bytes) -> List[Dict[str, Any]]:
     # Sort by position (y then x)
     deduplicated.sort(key=lambda x: (min(p[1] for p in x['bbox']), min(p[0] for p in x['bbox'])))
     
-    # Merge nearby lines (combine text in same bubble)
-    merge_start = time.time()
-    merged = merge_nearby_lines(deduplicated)
-    
-    if DEBUG_MODE and len(merged) < len(deduplicated):
-        logger.info(f"[ADAPTIVE] Line merging: {len(deduplicated)} -> {len(merged)} bubbles "
-                   f"in {time.time() - merge_start:.1f}s")
-    
     elapsed = time.time() - start_time
     
     if DEBUG_MODE:
-        logger.info(f"[ADAPTIVE] Complete: {len(merged)} bubbles in {elapsed:.1f}s | "
+        logger.info(f"[ADAPTIVE] Complete: {len(deduplicated)} lines in {elapsed:.1f}s | "
                    f"Strategy: {plan['strategy']} | PassB tiles: {len(bad_tiles)}")
         
         # Save debug overlay
-        if merged:
+        if deduplicated:
             debug_path = os.path.join(DEBUG_DIR, f"adaptive_{int(time.time())}.jpg")
-            draw_debug_boxes(image, merged, debug_path, 
-                           f"{plan['strategy']}: {len(merged)} bubbles")
+            draw_debug_boxes(image, deduplicated, debug_path, 
+                           f"{plan['strategy']}: {len(deduplicated)} lines")
     
-    return merged
+    return deduplicated
 
 
 def _run_ocr_on_image(image: Image.Image, pass_name: str = "") -> List[Dict[str, Any]]:
