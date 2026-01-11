@@ -59,6 +59,7 @@ def get_ocr_instance():
         
         # Build PaddleOCR initialization parameters (PaddleOCR 3.x API)
         # Note: GPU is auto-detected (CPU for dev, GPU for RunPod production)
+        # CRITICAL: Explicitly disable document preprocessor to avoid compatibility issues
         ocr_params = {
             "lang": lang,
             "use_angle_cls": use_angle_cls,
@@ -70,6 +71,7 @@ def get_ocr_instance():
             "text_recognition_batch_size": text_recognition_batch_size,
             "text_rec_score_thresh": text_rec_score_thresh,
             "return_word_box": return_word_box,
+            "enable_doc_preprocessor": False,  # Disable UVDoc/doc unwarp (not needed for webtoons)
         }
         
         # Add optional parameters if set
