@@ -51,7 +51,6 @@ def get_ocr_instance():
             
             # Advanced settings
             "return_word_box": False,
-            "show_log": False,
             
             # CRITICAL: Explicitly disable document preprocessor per official PaddleOCR docs
             # Reference: https://github.com/PaddlePaddle/PaddleOCR#3-run-inference-by-cli
