@@ -127,6 +127,29 @@ class SupabaseDB:
             return response.data[0]["segment_id"]
         return None
     
+    def get_segment_ids_for_assets(self, asset_ids: List[str]) -> Dict[str, str]:
+        """Batch lookup segment_ids for multiple assets. Returns dict of asset_id -> segment_id."""
+        if not asset_ids:
+            return {}
+        
+        segment_map = {}
+        batch_size = 500  # Smaller batch to avoid URL length issues
+        
+        for i in range(0, len(asset_ids), batch_size):
+            batch = asset_ids[i:i + batch_size]
+            
+            response = self.client.table("segment_assets").select(
+                "asset_id, segment_id"
+            ).in_(
+                "asset_id", batch
+            ).execute()
+            
+            if response.data:
+                for row in response.data:
+                    segment_map[row["asset_id"]] = row["segment_id"]
+        
+        return segment_map
+    
     def get_segment_edition_work(self, segment_id: str) -> Optional[Dict[str, str]]:
         """
         Get edition_id and work_id for a segment.
@@ -193,22 +216,20 @@ class SupabaseDB:
         """
         Get raw_image assets for an edition that don't yet have OCR output.
         Used by enqueue script.
-        If limit is None, fetches all matching assets using pagination (1000 per batch).
+        If limit is None, fetches all assets with pagination.
         """
         if limit is not None:
-            # Simple query with limit
-            query = self.client.table("assets").select(
+            response = self.client.table("assets").select(
                 "id, r2_key"
             ).eq(
                 "asset_type", "raw_image"
             ).like(
                 "r2_key", f"%/{edition_id}/%"
-            ).limit(limit)
+            ).limit(limit).execute()
             
-            response = query.execute()
             return response.data if response.data else []
         
-        # Pagination: fetch in batches of 1000
+        # Fetch all with pagination
         all_assets = []
         batch_size = 1000
         offset = 0
@@ -222,12 +243,11 @@ class SupabaseDB:
                 "r2_key", f"%/{edition_id}/%"
             ).range(offset, offset + batch_size - 1).execute()
             
-            if not response.data or len(response.data) == 0:
+            if not response.data:
                 break
             
             all_assets.extend(response.data)
             
-            # If we got less than batch_size, we're done
             if len(response.data) < batch_size:
                 break
             
@@ -235,50 +255,17 @@ class SupabaseDB:
         
         return all_assets
     
-    def get_raw_images_by_prefix(self, prefix: str, limit: int = None) -> List[Dict[str, Any]]:
-        """
-        Get raw_image assets matching a key prefix.
-        If limit is None, fetches all matching assets using pagination (1000 per batch).
-        """
-        if limit is not None:
-            # Simple query with limit
-            query = self.client.table("assets").select(
-                "id, r2_key"
-            ).eq(
-                "asset_type", "raw_image"
-            ).like(
-                "r2_key", f"{prefix}%"
-            ).limit(limit)
-            
-            response = query.execute()
-            return response.data if response.data else []
+    def get_raw_images_by_prefix(self, prefix: str, limit: int = 500) -> List[Dict[str, Any]]:
+        """Get raw_image assets matching a key prefix."""
+        response = self.client.table("assets").select(
+            "id, r2_key"
+        ).eq(
+            "asset_type", "raw_image"
+        ).like(
+            "r2_key", f"{prefix}%"
+        ).limit(limit).execute()
         
-        # Pagination: fetch in batches of 1000
-        all_assets = []
-        batch_size = 1000
-        offset = 0
-        
-        while True:
-            response = self.client.table("assets").select(
-                "id, r2_key"
-            ).eq(
-                "asset_type", "raw_image"
-            ).like(
-                "r2_key", f"{prefix}%"
-            ).range(offset, offset + batch_size - 1).execute()
-            
-            if not response.data or len(response.data) == 0:
-                break
-            
-            all_assets.extend(response.data)
-            
-            # If we got less than batch_size, we're done
-            if len(response.data) < batch_size:
-                break
-            
-            offset += batch_size
-        
-        return all_assets
+        return response.data if response.data else []
     
     def ocr_asset_exists(self, output_r2_key: str) -> Optional[str]:
         """Check if OCR asset already exists, return its ID if so."""
@@ -286,6 +273,101 @@ class SupabaseDB:
         if asset:
             return asset["id"]
         return None
+    
+    def get_existing_ocr_keys_for_edition(self, edition_id: str) -> set:
+        """Get all existing OCR output r2_keys for an edition. Fast batch check with pagination."""
+        existing_keys = set()
+        batch_size = 1000
+        offset = 0
+        
+        while True:
+            response = self.client.table("assets").select(
+                "r2_key"
+            ).eq(
+                "asset_type", "ocr_output"
+            ).like(
+                "r2_key", f"%/{edition_id}/%"
+            ).range(offset, offset + batch_size - 1).execute()
+            
+            if not response.data:
+                break
+            
+            existing_keys.update(asset["r2_key"] for asset in response.data)
+            
+            if len(response.data) < batch_size:
+                break
+            
+            offset += batch_size
+        
+        return existing_keys
+    
+    def get_completed_asset_ids_for_edition(self, edition_id: str) -> set:
+        """Get asset IDs that already have completed OCR jobs (success status)."""
+        completed_ids = set()
+        batch_size = 1000
+        offset = 0
+        
+        while True:
+            response = self.client.table("pipeline_jobs").select(
+                "input"
+            ).eq(
+                "edition_id", edition_id
+            ).eq(
+                "job_type", "clean"
+            ).eq(
+                "status", "success"
+            ).filter(
+                "input->>task", "eq", "ocr_page"
+            ).range(offset, offset + batch_size - 1).execute()
+            
+            if not response.data:
+                break
+            
+            for job in response.data:
+                if job.get("input") and job["input"].get("raw_asset_id"):
+                    completed_ids.add(job["input"]["raw_asset_id"])
+            
+            if len(response.data) < batch_size:
+                break
+            
+            offset += batch_size
+        
+        return completed_ids
+    
+    def get_existing_job_asset_ids_for_edition(self, edition_id: str) -> set:
+        """Get asset IDs that already have OCR jobs (any status: queued, running, success, failed)."""
+        existing_ids = set()
+        batch_size = 1000
+        offset = 0
+        
+        while True:
+            response = self.client.table("pipeline_jobs").select(
+                "input, status"
+            ).eq(
+                "edition_id", edition_id
+            ).eq(
+                "job_type", "clean"
+            ).filter(
+                "input->>task", "eq", "ocr_page"
+            ).range(offset, offset + batch_size - 1).execute()
+            
+            if not response.data:
+                break
+            
+            for job in response.data:
+                # Skip failed jobs - allow retry
+                if job.get("status") == "failed":
+                    continue
+                    
+                if job.get("input") and job["input"].get("raw_asset_id"):
+                    existing_ids.add(job["input"]["raw_asset_id"])
+            
+            if len(response.data) < batch_size:
+                break
+            
+            offset += batch_size
+        
+        return existing_ids
     
     def insert_ocr_job(
         self,
@@ -317,3 +399,42 @@ class SupabaseDB:
         
         response = self.client.table("pipeline_jobs").insert(insert_data).execute()
         return response.data[0]["id"]
+    
+    def insert_ocr_jobs_batch(self, jobs: List[Dict[str, Any]]) -> int:
+        """Batch insert OCR jobs. Returns count of jobs created."""
+        if not jobs:
+            return 0
+        
+        batch_size = 500
+        total = 0
+        
+        for i in range(0, len(jobs), batch_size):
+            batch = jobs[i:i + batch_size]
+            insert_data = []
+            
+            for job in batch:
+                job_input = {
+                    "task": "ocr_page",
+                    "raw_asset_id": job["raw_asset_id"],
+                    "force": job.get("force", False)
+                }
+                
+                data = {
+                    "job_type": "clean",
+                    "status": "queued",
+                    "input": job_input
+                }
+                
+                if job.get("edition_id"):
+                    data["edition_id"] = job["edition_id"]
+                if job.get("segment_id"):
+                    data["segment_id"] = job["segment_id"]
+                if job.get("work_id"):
+                    data["work_id"] = job["work_id"]
+                
+                insert_data.append(data)
+            
+            response = self.client.table("pipeline_jobs").insert(insert_data).execute()
+            total += len(response.data) if response.data else 0
+        
+        return total

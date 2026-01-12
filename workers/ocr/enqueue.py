@@ -5,11 +5,8 @@ OCR Job Enqueue Script
 Creates OCR jobs for raw images that don't yet have OCR output.
 
 Usage:
-    python workers/ocr/enqueue.py --edition-id <uuid>
-    python workers/ocr/enqueue.py --edition-id <uuid> --limit 100
-    python workers/ocr/enqueue.py --prefix raw/manhwa/... --limit 50
-    
-By default (without --limit), processes ALL assets that need OCR for the edition.
+    python workers/ocr/enqueue.py --edition-id <uuid> --limit 500
+    python workers/ocr/enqueue.py --prefix raw/manhwa/... --limit 100
 """
 import os
 import sys
@@ -39,42 +36,44 @@ def enqueue_jobs(
     """
     if edition_id:
         logger.info(f"Finding raw images for edition: {edition_id}")
-        if limit:
-            logger.info(f"Limit set to: {limit}")
-        else:
-            logger.info("No limit - fetching ALL assets (using pagination for large datasets)")
         assets = db.get_raw_images_for_edition(edition_id, limit)
     elif prefix:
         logger.info(f"Finding raw images with prefix: {prefix}")
-        if limit:
-            logger.info(f"Limit set to: {limit}")
-        else:
-            logger.info("No limit - fetching ALL assets (using pagination for large datasets)")
         assets = db.get_raw_images_by_prefix(prefix, limit)
     else:
         logger.error("Must specify --edition-id or --prefix")
         return 0
     
-    logger.info(f"Found {len(assets)} raw image assets (total available)")
+    logger.info(f"Found {len(assets)} raw image assets")
     
-    created = 0
+    # Batch check existing jobs (any status except failed)
+    existing_job_ids = set()
+    if not force and edition_id:
+        logger.info("Checking existing OCR jobs (queued, running, success)...")
+        existing_job_ids = db.get_existing_job_asset_ids_for_edition(edition_id)
+        logger.info(f"Found {len(existing_job_ids)} assets with existing jobs")
+    
+    # Batch get segment_ids for all assets
+    asset_ids = [asset["id"] for asset in assets]
+    logger.info("Fetching segment IDs (batch)...")
+    segment_map = db.get_segment_ids_for_assets(asset_ids)
+    logger.info(f"Found {len(segment_map)} segment mappings")
+    
+    # Prepare jobs to insert
+    jobs_to_insert = []
     skipped = 0
     
-    for idx, asset in enumerate(assets, 1):
+    for asset in assets:
         asset_id = asset["id"]
         r2_key = asset["r2_key"]
         
-        output_key = build_output_key(r2_key, asset_id)
-        
-        if not force:
-            existing = db.ocr_asset_exists(output_key)
-            if existing:
-                skipped += 1
-                continue
+        # Skip if already has a job (queued, running, or success)
+        if not force and asset_id in existing_job_ids:
+            skipped += 1
+            continue
         
         parsed = parse_raw_key(r2_key)
-        
-        segment_id = db.get_segment_id_for_asset(asset_id)
+        segment_id = segment_map.get(asset_id)
         
         job_edition_id = edition_id
         job_work_id = None
@@ -83,21 +82,20 @@ def enqueue_jobs(
             job_edition_id = job_edition_id or parsed.edition_id
             job_work_id = parsed.work_id
         
-        try:
-            job_id = db.insert_ocr_job(
-                raw_asset_id=asset_id,
-                edition_id=job_edition_id,
-                segment_id=segment_id,
-                work_id=job_work_id,
-                force=force
-            )
-            created += 1
-            if idx % 100 == 0 or idx == len(assets):
-                logger.info(f"Progress: {idx}/{len(assets)} processed | Created: {created} | Skipped: {skipped}")
-            else:
-                logger.debug(f"Created job {job_id} for asset {asset_id}")
-        except Exception as e:
-            logger.error(f"Failed to create job for {asset_id}: {e}")
+        jobs_to_insert.append({
+            "raw_asset_id": asset_id,
+            "edition_id": job_edition_id,
+            "segment_id": segment_id,
+            "work_id": job_work_id,
+            "force": force
+        })
+    
+    # Batch insert jobs
+    created = 0
+    if jobs_to_insert:
+        logger.info(f"Batch inserting {len(jobs_to_insert)} jobs...")
+        created = db.insert_ocr_jobs_batch(jobs_to_insert)
+        logger.info(f"Batch insert completed")
     
     logger.info(f"Done: created={created}, skipped={skipped}")
     return created
@@ -118,7 +116,7 @@ def main():
         "--limit",
         type=int,
         default=None,
-        help="Maximum jobs to create (default: no limit, process all unfinished)"
+        help="Maximum jobs to create (default: all assets for edition, 500 for prefix)"
     )
     parser.add_argument(
         "--force",
