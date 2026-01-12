@@ -53,6 +53,13 @@ def enqueue_jobs(
         existing_job_ids = db.get_existing_job_asset_ids_for_edition(edition_id)
         logger.info(f"Found {len(existing_job_ids)} assets with existing jobs")
     
+    # Batch check existing OCR outputs
+    existing_ocr_keys = set()
+    if not force and edition_id:
+        logger.info("Checking existing OCR outputs...")
+        existing_ocr_keys = db.get_existing_ocr_keys_for_edition(edition_id)
+        logger.info(f"Found {len(existing_ocr_keys)} existing OCR outputs")
+    
     # Batch get segment_ids for all assets
     asset_ids = [asset["id"] for asset in assets]
     logger.info("Fetching segment IDs (batch)...")
@@ -71,6 +78,13 @@ def enqueue_jobs(
         if not force and asset_id in existing_job_ids:
             skipped += 1
             continue
+        
+        # Skip if OCR output already exists
+        if not force:
+            output_key = build_output_key(r2_key, asset_id)
+            if output_key in existing_ocr_keys:
+                skipped += 1
+                continue
         
         parsed = parse_raw_key(r2_key)
         segment_id = segment_map.get(asset_id)
