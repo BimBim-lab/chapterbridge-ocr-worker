@@ -70,9 +70,6 @@ def get_ocr_instance():
             gpu_status = "CPU (GPU check failed)"
         
         logger.info(f"PaddleOCR initialized: {gpu_status}, PP-OCRv5")
-        logger.info(f"Model: {ocr_version}, Language: {lang}, Angle Cls: {use_angle_cls}")
-        logger.info(f"Detection: thresh={text_det_thresh}, box_thresh={text_det_box_thresh}, unclip={text_det_unclip_ratio}")
-        logger.info(f"Recognition: batch={text_recognition_batch_size}, score_thresh={text_rec_score_thresh}")
     
     return _ocr_instance
 
