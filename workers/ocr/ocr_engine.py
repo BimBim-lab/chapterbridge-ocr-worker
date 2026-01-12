@@ -49,9 +49,6 @@ def get_ocr_instance():
             "text_recognition_batch_size": 6,  # Process 6 text regions at once
             "text_rec_score_thresh": 0.3,
             
-            # Advanced settings
-            "return_word_box": False,
-            
             # CRITICAL: Explicitly disable document preprocessor per official PaddleOCR docs
             # Reference: https://github.com/PaddlePaddle/PaddleOCR#3-run-inference-by-cli
             # Note: use_textline_orientation removed - conflicts with use_angle_cls
