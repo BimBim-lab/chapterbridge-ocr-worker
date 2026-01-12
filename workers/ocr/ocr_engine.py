@@ -55,9 +55,9 @@ def get_ocr_instance():
             
             # CRITICAL: Explicitly disable document preprocessor per official PaddleOCR docs
             # Reference: https://github.com/PaddlePaddle/PaddleOCR#3-run-inference-by-cli
+            # Note: use_textline_orientation removed - conflicts with use_angle_cls
             "use_doc_orientation_classify": False,
             "use_doc_unwarping": False,
-            "use_textline_orientation": False,
         }
         
         _ocr_instance = PaddleOCR(**ocr_params)
