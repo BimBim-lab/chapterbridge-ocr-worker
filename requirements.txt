@@ -1,8 +1,9 @@
 # PaddleOCR 3.0+ with PP-OCRv5 support
 paddleocr>=3.0.0
 
-# PaddlePaddle GPU (DO NOT install via requirements - use manual command below)
-# GPU Installation: pip install paddlepaddle-gpu==3.0.0b2 -i https://www.paddlepaddle.org.cn/packages/stable/cu118/
+# PaddlePaddle GPU 2.6.1 (stable, compatible with PP-OCRv5)
+# GPU Installation: pip install paddlepaddle-gpu==2.6.1 -i https://www.paddlepaddle.org.cn/packages/stable/cu118/
+# Note: PaddlePaddle 3.0.0b2 has compatibility issues with PP-OCRv5 models
 # Note: paddlepaddle and paddlepaddle-gpu conflict - only install one
 
 # Cloud Storage & Database
