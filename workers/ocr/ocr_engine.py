@@ -22,19 +22,19 @@ DEBUG_DIR = os.environ.get("OCR_DEBUG_DIR", "debug")
 def get_ocr_instance():
     """
     Get or create singleton PaddleOCR instance optimized for webtoon OCR.
-    PaddleOCR 3.x auto-detects GPU availability (CPU for dev, GPU for RunPod).
-    Uses PP-OCRv5 with hardcoded optimal settings for speed and accuracy.
+    PaddleOCR 2.9.1 auto-detects GPU availability (CPU for dev, GPU for RunPod).
+    Uses PP-OCRv4 with hardcoded optimal settings for speed and accuracy.
     """
     global _ocr_instance
     
     if _ocr_instance is None:
         from paddleocr import PaddleOCR
         
-        # Build PaddleOCR initialization parameters (PaddleOCR 3.x API)
+        # Build PaddleOCR initialization parameters (PaddleOCR 2.9.1 API)
         # Optimized for webtoon text: English language, GPU acceleration, high throughput
         ocr_params = {
             # Model & Language
-            "ocr_version": "PP-OCRv5",
+            "ocr_version": "PP-OCRv4",
             "lang": "en",
             "use_angle_cls": False,  # Webtoons are not rotated
             
@@ -66,7 +66,7 @@ def get_ocr_instance():
         except:
             gpu_status = "CPU (GPU check failed)"
         
-        logger.info(f"PaddleOCR initialized: {gpu_status}, PP-OCRv5")
+        logger.info(f"PaddleOCR initialized: {gpu_status}, PP-OCRv4")
     
     return _ocr_instance
 
