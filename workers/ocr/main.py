@@ -11,6 +11,7 @@ Usage:
 import os
 import sys
 import time
+import random
 import argparse
 import traceback
 from datetime import datetime, timezone
@@ -219,7 +220,10 @@ def process_job(db: SupabaseDB, r2: R2Client, job: dict) -> None:
 
 def run_daemon(poll_seconds: int) -> None:
     """Main daemon loop that polls for and processes jobs."""
-    logger.info(f"Starting OCR worker daemon (poll interval: {poll_seconds}s)")
+    # Add random startup delay to avoid thundering herd
+    startup_jitter = random.uniform(0, poll_seconds * 0.5)
+    logger.info(f"Starting OCR worker daemon (poll interval: {poll_seconds}s, startup delay: {startup_jitter:.2f}s)")
+    time.sleep(startup_jitter)
     
     db = SupabaseDB()
     r2 = R2Client()
@@ -241,7 +245,10 @@ def run_daemon(poll_seconds: int) -> None:
                     logger.error(f"Job {job['id']} failed: {error_msg}")
                     db.set_job_failed(job["id"], error_msg)
             else:
-                time.sleep(poll_seconds)
+                # Add random jitter to prevent all workers polling at same time
+                jitter = random.uniform(0, poll_seconds * 0.3)
+                sleep_time = poll_seconds + jitter
+                time.sleep(sleep_time)
                 
         except KeyboardInterrupt:
             logger.info("Shutting down...")

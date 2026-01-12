@@ -5,8 +5,11 @@ OCR Job Enqueue Script
 Creates OCR jobs for raw images that don't yet have OCR output.
 
 Usage:
-    python workers/ocr/enqueue.py --edition-id <uuid> --limit 500
-    python workers/ocr/enqueue.py --prefix raw/manhwa/... --limit 100
+    python workers/ocr/enqueue.py --edition-id <uuid>
+    python workers/ocr/enqueue.py --edition-id <uuid> --limit 100
+    python workers/ocr/enqueue.py --prefix raw/manhwa/... --limit 50
+    
+By default (without --limit), processes ALL assets that need OCR for the edition.
 """
 import os
 import sys
@@ -27,7 +30,7 @@ def enqueue_jobs(
     db: SupabaseDB,
     edition_id: str = None,
     prefix: str = None,
-    limit: int = 500,
+    limit: int = None,
     force: bool = False
 ) -> int:
     """
@@ -36,20 +39,28 @@ def enqueue_jobs(
     """
     if edition_id:
         logger.info(f"Finding raw images for edition: {edition_id}")
+        if limit:
+            logger.info(f"Limit set to: {limit}")
+        else:
+            logger.info("No limit - fetching ALL assets (using pagination for large datasets)")
         assets = db.get_raw_images_for_edition(edition_id, limit)
     elif prefix:
         logger.info(f"Finding raw images with prefix: {prefix}")
+        if limit:
+            logger.info(f"Limit set to: {limit}")
+        else:
+            logger.info("No limit - fetching ALL assets (using pagination for large datasets)")
         assets = db.get_raw_images_by_prefix(prefix, limit)
     else:
         logger.error("Must specify --edition-id or --prefix")
         return 0
     
-    logger.info(f"Found {len(assets)} raw image assets")
+    logger.info(f"Found {len(assets)} raw image assets (total available)")
     
     created = 0
     skipped = 0
     
-    for asset in assets:
+    for idx, asset in enumerate(assets, 1):
         asset_id = asset["id"]
         r2_key = asset["r2_key"]
         
@@ -81,7 +92,10 @@ def enqueue_jobs(
                 force=force
             )
             created += 1
-            logger.info(f"Created job {job_id} for asset {asset_id}")
+            if idx % 100 == 0 or idx == len(assets):
+                logger.info(f"Progress: {idx}/{len(assets)} processed | Created: {created} | Skipped: {skipped}")
+            else:
+                logger.debug(f"Created job {job_id} for asset {asset_id}")
         except Exception as e:
             logger.error(f"Failed to create job for {asset_id}: {e}")
     
@@ -103,8 +117,8 @@ def main():
     parser.add_argument(
         "--limit",
         type=int,
-        default=500,
-        help="Maximum jobs to create (default: 500)"
+        default=None,
+        help="Maximum jobs to create (default: no limit, process all unfinished)"
     )
     parser.add_argument(
         "--force",

@@ -189,32 +189,96 @@ class SupabaseDB:
             "role": role
         }, on_conflict="segment_id,asset_id").execute()
     
-    def get_raw_images_for_edition(self, edition_id: str, limit: int = 500) -> List[Dict[str, Any]]:
+    def get_raw_images_for_edition(self, edition_id: str, limit: int = None) -> List[Dict[str, Any]]:
         """
         Get raw_image assets for an edition that don't yet have OCR output.
         Used by enqueue script.
+        If limit is None, fetches all matching assets using pagination (1000 per batch).
         """
-        response = self.client.table("assets").select(
-            "id, r2_key"
-        ).eq(
-            "asset_type", "raw_image"
-        ).like(
-            "r2_key", f"%/{edition_id}/%"
-        ).limit(limit).execute()
+        if limit is not None:
+            # Simple query with limit
+            query = self.client.table("assets").select(
+                "id, r2_key"
+            ).eq(
+                "asset_type", "raw_image"
+            ).like(
+                "r2_key", f"%/{edition_id}/%"
+            ).limit(limit)
+            
+            response = query.execute()
+            return response.data if response.data else []
         
-        return response.data if response.data else []
+        # Pagination: fetch in batches of 1000
+        all_assets = []
+        batch_size = 1000
+        offset = 0
+        
+        while True:
+            response = self.client.table("assets").select(
+                "id, r2_key"
+            ).eq(
+                "asset_type", "raw_image"
+            ).like(
+                "r2_key", f"%/{edition_id}/%"
+            ).range(offset, offset + batch_size - 1).execute()
+            
+            if not response.data or len(response.data) == 0:
+                break
+            
+            all_assets.extend(response.data)
+            
+            # If we got less than batch_size, we're done
+            if len(response.data) < batch_size:
+                break
+            
+            offset += batch_size
+        
+        return all_assets
     
-    def get_raw_images_by_prefix(self, prefix: str, limit: int = 500) -> List[Dict[str, Any]]:
-        """Get raw_image assets matching a key prefix."""
-        response = self.client.table("assets").select(
-            "id, r2_key"
-        ).eq(
-            "asset_type", "raw_image"
-        ).like(
-            "r2_key", f"{prefix}%"
-        ).limit(limit).execute()
+    def get_raw_images_by_prefix(self, prefix: str, limit: int = None) -> List[Dict[str, Any]]:
+        """
+        Get raw_image assets matching a key prefix.
+        If limit is None, fetches all matching assets using pagination (1000 per batch).
+        """
+        if limit is not None:
+            # Simple query with limit
+            query = self.client.table("assets").select(
+                "id, r2_key"
+            ).eq(
+                "asset_type", "raw_image"
+            ).like(
+                "r2_key", f"{prefix}%"
+            ).limit(limit)
+            
+            response = query.execute()
+            return response.data if response.data else []
         
-        return response.data if response.data else []
+        # Pagination: fetch in batches of 1000
+        all_assets = []
+        batch_size = 1000
+        offset = 0
+        
+        while True:
+            response = self.client.table("assets").select(
+                "id, r2_key"
+            ).eq(
+                "asset_type", "raw_image"
+            ).like(
+                "r2_key", f"{prefix}%"
+            ).range(offset, offset + batch_size - 1).execute()
+            
+            if not response.data or len(response.data) == 0:
+                break
+            
+            all_assets.extend(response.data)
+            
+            # If we got less than batch_size, we're done
+            if len(response.data) < batch_size:
+                break
+            
+            offset += batch_size
+        
+        return all_assets
     
     def ocr_asset_exists(self, output_r2_key: str) -> Optional[str]:
         """Check if OCR asset already exists, return its ID if so."""

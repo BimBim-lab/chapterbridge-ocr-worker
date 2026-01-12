@@ -38,22 +38,20 @@ def get_ocr_instance():
             "lang": "en",
             "use_angle_cls": False,  # Webtoons are not rotated
             
-            # Detection Parameters (optimized for GPU)
-            "text_det_limit_side_len": 4096,  # GPU can handle large images
-            "text_det_limit_type": "max",
-            "text_det_thresh": 0.15,  # Lower = more sensitive
-            "text_det_box_thresh": 0.35,
-            "text_det_unclip_ratio": 2.5,
+            # Detection Parameters (PaddleOCR 2.9.1 uses det_* not text_det_*)
+            "det_limit_side_len": 4096,  # GPU can handle large images
+            "det_limit_type": "max",
+            "det_db_thresh": 0.15,  # Lower = more sensitive detection
+            "det_db_box_thresh": 0.35,  # Box confidence threshold
+            "det_db_unclip_ratio": 2.5,  # Expand detection boxes
             
             # Recognition Parameters (batch processing for speed)
-            "text_recognition_batch_size": 6,  # Process 6 text regions at once
-            "text_rec_score_thresh": 0.3,
+            "rec_batch_num": 6,  # Process 6 text regions at once
+            "drop_score": 0.3,  # Minimum recognition confidence
             
             # CRITICAL: Explicitly disable document preprocessor per official PaddleOCR docs
             # Reference: https://github.com/PaddlePaddle/PaddleOCR#3-run-inference-by-cli
-            # Note: use_textline_orientation removed - conflicts with use_angle_cls
-            "use_doc_orientation_classify": False,
-            "use_doc_unwarping": False,
+            "use_angle_cls": False,
         }
         
         _ocr_instance = PaddleOCR(**ocr_params)
@@ -322,42 +320,35 @@ def run_ocr(image_bytes: bytes) -> List[Dict[str, Any]]:
     
     lines = []
     
-    # PaddleOCR 3.x returns OCRResult object
-    if result and len(result) > 0:
-        ocr_result = result[0]
-        
-        # Access as dict-like object
-        if hasattr(ocr_result, '__getitem__'):
+    # PaddleOCR 2.9.1 returns: [[bbox, (text, confidence)], ...]
+    if result and len(result) > 0 and result[0]:
+        for detection in result[0]:
+            if not detection or len(detection) < 2:
+                continue
+            
+            bbox_raw, text_tuple = detection
+            
+            if not text_tuple or len(text_tuple) < 2:
+                continue
+            
+            text, confidence = text_tuple
+            
+            # Format bbox as [[x,y], [x,y], [x,y], [x,y]]
+            bbox_formatted = []
             try:
-                rec_texts = ocr_result.get('rec_texts', []) if hasattr(ocr_result, 'get') else (ocr_result['rec_texts'] if 'rec_texts' in ocr_result else [])
-                rec_scores = ocr_result.get('rec_scores', []) if hasattr(ocr_result, 'get') else (ocr_result['rec_scores'] if 'rec_scores' in ocr_result else [])
-                rec_polys = ocr_result.get('rec_polys', []) if hasattr(ocr_result, 'get') else (ocr_result['rec_polys'] if 'rec_polys' in ocr_result else [])
-                
-                # Combine texts, scores, and bboxes
-                for i in range(len(rec_texts)):
-                    text = rec_texts[i]
-                    confidence = rec_scores[i] if i < len(rec_scores) else 0.0
-                    bbox = rec_polys[i] if i < len(rec_polys) else None
+                if bbox_raw and len(bbox_raw) >= 4:
+                    for pt in bbox_raw[:4]:
+                        if hasattr(pt, '__getitem__') and len(pt) >= 2:
+                            bbox_formatted.append([float(pt[0]), float(pt[1])])
                     
-                    # Format bbox as [[x,y], [x,y], [x,y], [x,y]]
-                    bbox_formatted = []
-                    try:
-                        if bbox is not None and hasattr(bbox, '__len__') and len(bbox) >= 4:
-                            for pt in bbox[:4]:
-                                if hasattr(pt, '__getitem__') and len(pt) >= 2:
-                                    bbox_formatted.append([float(pt[0]), float(pt[1])])
-                            
-                            if len(bbox_formatted) == 4:
-                                lines.append({
-                                    "text": str(text),
-                                    "confidence": round(float(confidence), 4),
-                                    "bbox": bbox_formatted
-                                })
-                    except (ValueError, TypeError, IndexError):
-                        continue
-                        
-            except (KeyError, TypeError):
-                pass
+                    if len(bbox_formatted) == 4:
+                        lines.append({
+                            "text": str(text),
+                            "confidence": round(float(confidence), 4),
+                            "bbox": bbox_formatted
+                        })
+            except (ValueError, TypeError, IndexError):
+                continue
     
     return lines
 
@@ -724,38 +715,35 @@ def _run_ocr_on_image(image: Image.Image, pass_name: str = "") -> List[Dict[str,
         
         lines = []
         
-        if result and len(result) > 0:
-            ocr_result = result[0]
-            
-            if hasattr(ocr_result, '__getitem__'):
+        # PaddleOCR 2.9.1 returns: [[bbox, (text, confidence)], ...]
+        if result and len(result) > 0 and result[0]:
+            for detection in result[0]:
+                if not detection or len(detection) < 2:
+                    continue
+                
+                bbox_raw, text_tuple = detection
+                
+                if not text_tuple or len(text_tuple) < 2:
+                    continue
+                
+                text, confidence = text_tuple
+                
+                # Format bbox as [[x,y], [x,y], [x,y], [x,y]]
+                bbox_formatted = []
                 try:
-                    rec_texts = ocr_result.get('rec_texts', []) if hasattr(ocr_result, 'get') else (ocr_result['rec_texts'] if 'rec_texts' in ocr_result else [])
-                    rec_scores = ocr_result.get('rec_scores', []) if hasattr(ocr_result, 'get') else (ocr_result['rec_scores'] if 'rec_scores' in ocr_result else [])
-                    rec_polys = ocr_result.get('rec_polys', []) if hasattr(ocr_result, 'get') else (ocr_result['rec_polys'] if 'rec_polys' in ocr_result else [])
-                    
-                    for i in range(len(rec_texts)):
-                        text = rec_texts[i]
-                        confidence = rec_scores[i] if i < len(rec_scores) else 0.0
-                        bbox = rec_polys[i] if i < len(rec_polys) else None
+                    if bbox_raw and len(bbox_raw) >= 4:
+                        for pt in bbox_raw[:4]:
+                            if hasattr(pt, '__getitem__') and len(pt) >= 2:
+                                bbox_formatted.append([float(pt[0]), float(pt[1])])
                         
-                        bbox_formatted = []
-                        try:
-                            if bbox is not None and hasattr(bbox, '__len__') and len(bbox) >= 4:
-                                for pt in bbox[:4]:
-                                    if hasattr(pt, '__getitem__') and len(pt) >= 2:
-                                        bbox_formatted.append([float(pt[0]), float(pt[1])])
-                                
-                                if len(bbox_formatted) == 4:
-                                    lines.append({
-                                        "text": str(text),
-                                        "confidence": round(float(confidence), 4),
-                                        "bbox": bbox_formatted
-                                    })
-                        except (ValueError, TypeError, IndexError):
-                            continue
-                            
-                except (KeyError, TypeError):
-                    pass
+                        if len(bbox_formatted) == 4:
+                            lines.append({
+                                "text": str(text),
+                                "confidence": round(float(confidence), 4),
+                                "bbox": bbox_formatted
+                            })
+                except (ValueError, TypeError, IndexError):
+                    continue
         
         if pass_name:
             logger.debug(f"OCR {pass_name} pass: {len(lines)} detections")
